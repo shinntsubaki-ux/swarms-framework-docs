@@ -229,6 +229,11 @@ CronJob.stop_many(jobs)
 
 Manually start the scheduled job.
 
+`start()` starts the scheduler thread; it does not register a task. On a new
+instance, use `run(task)` to register a task and block, or
+`run_many(..., block=False)` to register tasks and return immediately. Calling
+`start()` on a new instance leaves it running with no scheduled work.
+
 ```python
 cron.start()
 ```
@@ -506,41 +511,60 @@ except KeyboardInterrupt:
     cron.stop()
 ```
 
-### Monitoring Execution Stats
+### Monitoring execution stats
+
+Use `run_many(..., block=False)` to schedule a task while you monitor its
+execution from the main thread. Even for one agent, this gives you a public
+non-blocking entry point that both registers the task and starts its scheduler.
+
+The example below uses a plain callable, so you can run it without model API
+keys. It monitors a heartbeat for five seconds, then stops the scheduler in a
+`finally` block. Replace `heartbeat` with your agent and choose an appropriate
+interval when you are ready to schedule real work.
 
 ```python
-from swarms import Agent
-from swarms.structs.cron_job import CronJob
 import time
 
-agent = Agent(
-    agent_name="Monitor-Agent",
-    system_prompt="Monitor system metrics.",
-    model_name="gpt-4"
-)
+from swarms.structs.cron_job import CronJob
 
-cron = CronJob(
-    agent=agent,
-    interval="10seconds",
-    job_id="monitor"
-)
 
-# Start the job in background
-cron.start()
+def heartbeat(task: str) -> str:
+    return f"{task}: scheduler reached the task"
+
+
+jobs = CronJob.run_many(
+    [{
+        "agent": heartbeat,
+        "interval": "1second",
+        "task": "Check heartbeat",
+        "job_id": "monitor",
+    }],
+    block=False,
+)
+cron = jobs[0]
 
 try:
-    # Monitor stats every 30 seconds
-    while True:
-        time.sleep(30)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and cron.is_running:
+        time.sleep(1)
         stats = cron.get_execution_stats()
-        print(f"\nExecution Stats:")
+        print("\nExecution stats:")
         print(f"  Running: {stats['is_running']}")
         print(f"  Executions: {stats['execution_count']}")
         print(f"  Uptime: {stats['uptime']:.2f}s")
-except KeyboardInterrupt:
-    print("Stopping monitor...")
-    cron.stop()
+finally:
+    CronJob.stop_many(jobs)
 ```
+
+Check that `execution_count` increases after the first interval. An
+`is_running` value of `True` only tells you the scheduler is running; it does
+not prove that a task was registered or completed. The scheduler polls roughly
+once per second, so do not expect an exact execution count at a particular
+wall-clock instant. The first task runs after the interval, not immediately.
+
+Keep the caller alive while using `block=False`: scheduler threads are daemon
+threads and do not keep a Python process alive by themselves. Always stop the
+returned jobs when monitoring ends, including when the caller is interrupted.
 
 ## Exception Handling
 
